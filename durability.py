@@ -1,8 +1,12 @@
 ############
 #--------------------------------------------------------------------------------------------
+#code version B, 01/05/2024 (key change: works with "Bookworm RPiOS ver 12, Python 3.11.2)
+#								print statement added ()
+#								read_from_TiD1 simplified. Added byte response as a variable (TiD_Off and TiD_On)
+#								press_button_reed function added which operates on reed switch with additional timer safety cutout
 #code version A, 30/06/2022 (key change: rest time automatically calculated from duty cycle. input duty cycle)
 #--------------------------------------------------------------------------------------------
-#! Issue to fix: condition to turn TiC1 back on after 5min or 300 sec. Code it differenctly?
+#! Issue to fix: condition to turn TiD1 back on after 5min or 300 sec. Code it differenctly?
 #  Maybe start timer? And check timer condition? Or work out exact number. Currently two different
 #  numbers for the same condition: 296 and 300.
 
@@ -15,6 +19,7 @@ import time
 import datetime
 import sys
 import cursor
+from gpiozero import Button
 
 #Pin definitions
 #up = 04
@@ -35,14 +40,20 @@ key2_pressed = bytes(b'\xE8\xE8\xFF\x02\x02\x00\x00\x00\x00\x00\x00') # DOWN but
 #key4_pressed = bytes(b'\xE8\xE8\xFF\x08\x08\x00\x00\x00\x00\x00\x00') # IN button
 key6_pressed = bytes(b'\xE8\xE8\xFF\x20\x20\x00\x00\x00\x00\x00\x00') # POWER ON button
 
+TiD1_On = bytes(b'\xa8\xa8\x15\x15\x15\x15\x00\x00\x00\x00\x00\x00')
+TiD1_Off = bytes(b'\xa8\xa8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+
 # 8000 for full lifecycle, use 1088 at a time for full 7 days running. 
 # Perform current measurement after each week.
-cycles = 100
+cycles = 85
+
+reed_switch_up = Button(23)
+reed_switch_down = Button(25)
 
 #cycle times
-move_up = 54
+move_up = 20
  # moving up time in seconds
-move_down = 45
+move_down = 15.3
 # moving down time in seconds
 
 #move_out = 15.5 # moving out time in seconds
@@ -51,7 +62,7 @@ move_down = 45
 move_up_OCP_delay = 3.25
 
 #input duty cycle as a percentage expressed as decimal. So for 10% duty put 0.1, and for 25% put 0.25
-duty_cycle = 0.35
+duty_cycle = 0.70
 rest_times = ((1-duty_cycle)/(duty_cycle))
 cycle_rest = int(round((move_up + move_down)*rest_times)) # do a rest after each 'half-cycle'
 
@@ -65,7 +76,7 @@ command_rest = 1 # rest between issuing commands to control box
 # total cycle time will be a little bit longer. Below 2.4 seconds were added to the cycle count, derived over 10 cycles and comparing theoretical finish with actual
 #totaltime = (2.4 + move_up*2 + move_down*2 + move_out + move_in + command_rest*6 + cycle_rest*2 + move_up_OCP_delay*2) * cycles
 
-totaltime = (move_up*2 + move_down*2 + command_rest*4 + cycle_rest*2 + move_up_OCP_delay*2) * cycles
+totaltime = (move_up*4 + move_down*4 + command_rest*8 + cycle_rest*4) * cycles
 
 
 def checktime():
@@ -74,7 +85,7 @@ def checktime():
 	#print "dd.hour " + str (dd.hour)
 	if dd.weekday() < 4:
 		if dd.hour > 15:
-			print dd.weekday() + dd.hour
+			print(dd.weekday() + dd.hour)
 			return False
 		else:
 			return True
@@ -84,14 +95,9 @@ def checktime():
 		else:
 			return True
 
-def read_from_TiC1(tempserialport):
+def read_from_TiD1(tempserialport):
 	readport = tempserialport.read(size=12)
-	readstring = ""
-	readstring = \
-		'%x' % ord(readport[0]) +" "+ '%x' % ord(readport[1]) +" "+ '%x' % ord(readport[2]) +" "+ '%x' % ord(readport[3]) +" "+ \
-		'%x' % ord(readport[4]) +" "+ '%x' % ord(readport[5]) +" "+ '%x' % ord(readport[6]) +" "+ '%x' % ord(readport[7]) +" "+ \
-		'%x' % ord(readport[8]) +" "+ '%x' % ord(readport[9]) +" "+ '%x' % ord(readport[10]) +" "+ '%x' % ord(readport[11])
-	return str(readstring)
+	return readport
 
 def timestamp():
 	return (datetime.datetime.now().strftime("%Y-%b-%d %H:%M:%S.%f"))[:-5]
@@ -107,6 +113,25 @@ def press_button(serial_port_temp,key_pressed,move_time,rest_time,ii,ff,descr):
 	sys.stdout.write("\r" + timestamp() + "  Cycle [" + str(ii) + "] "+str(descr)+" operation complete\n")
 	ff.write(timestamp()+"  Cycle [" + str(ii) + "] "+str(descr)+" operation completed\n")
 	time.sleep(rest_time)
+
+def press_button_reed(serial_port_temp,key_pressed,reed_switch,move_time,rest_time,ii,ff,descr):
+	ff.write(timestamp()+"  Cycle [" + str(ii) + "] "+str(descr)+" operation started\n")
+	t1_start = time.perf_counter()
+	t2e_finish = t1_start + move_time
+	while reed_switch.is_pressed:
+		t2a_finish = time.perf_counter()
+		if t2a_finish > t2e_finish:
+			break
+		writeport = serial_port_temp.write(key_pressed)
+		sys.stdout.write(str("\r--- "+str(descr)+" operation. "))
+		sys.stdout.flush()
+	t2_finish = time.perf_counter()
+	sys.stdout.flush()		
+	sys.stdout.write("\r" + timestamp() + "  Cycle [" + str(ii) + "] "+str(descr)+" operation complete\n")
+	ff.write(timestamp()+"  Cycle [" + str(ii) + "] "+str(descr)+" operation completed\n")
+	ff.write(timestamp()+"  Time " + str(descr) + " "+str(t2_finish - t1_start)+" [s]\n")
+	time.sleep(rest_time)
+	return t2_finish - t1_start
 		
 
 def zeal_press_button(pin1,pin2,command_cycle_time,ii,ff,descr):
@@ -131,14 +156,14 @@ def zeal_press_button(pin1,pin2,command_cycle_time,ii,ff,descr):
 cursor.hide()
 
 f = open(datetime.datetime.now().strftime("%Y-%m-%d--%H%M%S") + ".txt","w+")
-print "\n" + timestamp() + "  Starting " + str(cycles) + " cycles with " + str(cycle_rest) + " seconds rest between\n"
+print("\n" + timestamp() + "  Starting " + str(cycles) + " loaded only day-cycles with " + str(cycle_rest) + " seconds rest between\n")
 f.write(timestamp() + "  " + str(cycles) + " cycles started with " + str(cycle_rest) + " seconds rest between\n")
-print timestamp() + "  Test will finish at  " + \
-	((datetime.datetime.now()+datetime.timedelta(seconds=totaltime)).strftime("%Y-%b-%d %H:%M:%S.%f"))[:-5]
+print(timestamp() + "  Test will finish at  " + \
+	((datetime.datetime.now()+datetime.timedelta(seconds=totaltime)).strftime("%Y-%b-%d %H:%M:%S.%f"))[:-5])
 f.write(timestamp() + "  Test will finish at  " + \
 	((datetime.datetime.now()+datetime.timedelta(seconds=totaltime)).strftime("%Y-%b-%d %H:%M:%S.%f"))[:-5]+'\n')
-print "Initiating communication with TiC1..."
-f.write(timestamp()+"  Initiating communication with TiC1...\n")
+print("Initiating communication with TiD1...")
+f.write(timestamp()+"  Initiating communication with TiD1...\n")
 
 i = 0
 
@@ -159,83 +184,174 @@ if checktime2:
 				if not serialport.isOpen():
 					serialport.open()
 					time.sleep(0.5)
-				if (read_from_TiC1(serialport)[0:13] == "a8 a8 0 0 0 0") or (read_from_TiC1(serialport)[0:17] == "a8 a8 15 15 15 15"):
-					print "Communication with TiC1 established"
-					f.write(timestamp()+"  Reading signal from TiC1: "+read_from_TiC1(serialport)+"\n")
-					f.write(timestamp()+"  Communication with TiC1 established\n")
+				TiD1status = read_from_TiD1(serialport)
+				if (TiD1status == TiD1_Off) or (TiD1status == TiD1_On):
+					print("Communication with TiD1 established")
+					f.write(timestamp()+"  Reading signal from TiD1: "+str(TiD1status)+"\n")
+					f.write(timestamp()+"  Communication with TiD1 established\n")
 					condition = False
 				else:
-					print "Repeating communication attempt..."
-					f.write(timestamp()+"  Reading signal from TiC1: "+read_from_TiC1(serialport)+"\n")
+					print("Repeating communication attempt...")
+					f.write(timestamp()+"  Reading signal from TiD1: "+str(TiD1status)+"\n")
 					f.write(timestamp()+"  Repeating communication attempt...\n")
 					serialport.close()
 					time.sleep(0.1)
 			
 			if (i == 1):
-				if (read_from_TiC1(serialport)[0:13] == "a8 a8 0 0 0 0"):
-					print "Turning TiC1 ON..."
-					f.write(timestamp()+"  Turning TiC1 ON...\n")
+				TiD1status2 = read_from_TiD1(serialport)
+				if (TiD1status2 == TiD1_Off):
+					print("Turning TiD1 ON...")
+					f.write(timestamp()+"  Turning TiD1 ON...\n")
 					end_time2 = time.time() + 1
 					while time.time() < end_time2:
 						writeport = serialport.write(key6_pressed)
 					time.sleep(1)
 				
 			if (i > 1) and (cycle_rest > 296):
-				print "Turning TiC1 ON..."
-				f.write(timestamp()+"  Turning TiC1 ON...\n")
+				print("Turning TiD1 ON...")
+				f.write(timestamp()+"  Turning TiD1 ON...\n")
 				end_time2 = time.time() + 1
 				while time.time() < end_time2:
 					writeport = serialport.write(key6_pressed)
 				time.sleep(1)
 				
 
-			press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
-			time.sleep(move_up_OCP_delay)
+			#press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
+			time_up = press_button_reed(serialport,key1_pressed,reed_switch_up,move_up,command_rest,i,f,"moving up")
+			print("Time moving up: "+str(time_up)+" [s]")
+			#time.sleep(move_up_OCP_delay)
 			#zeal_press_button(up,down,move_up,i,f,"moving up")
 				
 			#press_button(serialport,key3_pressed,move_out,command_rest,i,f,"moving out")
 				
-			press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+			#press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
 			#zeal_press_button(down,up,move_down,i,f,"moving down")
 			
+			#time_down = press_button_reed(serialport,key2_pressed,reed_switch_down,move_down,command_rest,i,f,"moving down")
+			#print(str(time_down))
+			
+			press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+
+			
 			#if (i != cycles):
-			f.write(timestamp()+"  Half-cycle [" + str(i) + "] rest time started\n")
-			for j in xrange(cycle_rest,0,-1):
-				sys.stdout.write("\r---Next half-cycle starts in: {:2d}".format(j) + " ")
+			f.write(timestamp()+"  1/4-cycle [" + str(i) + "] rest time started\n")
+			for j in range(cycle_rest,0,-1):
+				sys.stdout.write("\r---Next quarter-cycle starts in: {:2d}".format(j) + " ")
 				sys.stdout.flush()
 				time.sleep(1)
 			sys.stdout.flush()
-			sys.stdout.write("\r" + timestamp() + "  Half-cycle [" + str(i) + "] complete            \n")
-			f.write(timestamp()+"  Half-cycle [" + str(i) + "] rest time ended. Cycle 50% complete\n")
-			
-			if (i > 0) and (cycle_rest > 300):
-				print "Turning TiC1 ON..."
-				f.write(timestamp()+"  Turning TiC1 ON...\n")
+			sys.stdout.write("\r" + timestamp() + "  1/4-cycle [" + str(i) + "] complete            \n")
+			f.write(timestamp()+"  1/4-cycle [" + str(i) + "] rest time ended. Cycle 25% complete\n")
+
+			if (i > 1) and (cycle_rest > 296):
+				print("Turning TiD1 ON...")
+				f.write(timestamp()+"  Turning TiD1 ON...\n")
 				end_time2 = time.time() + 1
 				while time.time() < end_time2:
 					writeport = serialport.write(key6_pressed)
 				time.sleep(1)
 				
-			press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
-			time.sleep(move_up_OCP_delay)
+
+			#press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
+			time_up = press_button_reed(serialport,key1_pressed,reed_switch_up,move_up,command_rest,i,f,"moving up")
+			print("Time moving up: "+str(time_up)+" [s]")
+			#time.sleep(move_up_OCP_delay)
+			#zeal_press_button(up,down,move_up,i,f,"moving up")
+				
+			#press_button(serialport,key3_pressed,move_out,command_rest,i,f,"moving out")
+				
+			#press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+			#zeal_press_button(down,up,move_down,i,f,"moving down")
+			
+			#time_down = press_button_reed(serialport,key2_pressed,reed_switch_down,move_down,command_rest,i,f,"moving down")
+			#print(str(time_down))
+			
+			press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+
+			
+			#if (i != cycles):
+			f.write(timestamp()+"  2/4-cycle [" + str(i) + "] rest time started\n")
+			for j in range(cycle_rest,0,-1):
+				sys.stdout.write("\r---Next quarter-cycle starts in: {:2d}".format(j) + " ")
+				sys.stdout.flush()
+				time.sleep(1)
+			sys.stdout.flush()
+			sys.stdout.write("\r" + timestamp() + "  2/4-cycle [" + str(i) + "] complete            \n")
+			f.write(timestamp()+"  2/4-cycle [" + str(i) + "] rest time ended. Cycle 50% complete\n")
+
+			
+			if (i > 1) and (cycle_rest > 296):
+				print("Turning TiD1 ON...")
+				f.write(timestamp()+"  Turning TiD1 ON...\n")
+				end_time2 = time.time() + 1
+				while time.time() < end_time2:
+					writeport = serialport.write(key6_pressed)
+				time.sleep(1)
+				
+
+			#press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
+			time_up = press_button_reed(serialport,key1_pressed,reed_switch_up,move_up,command_rest,i,f,"moving up")
+			print("Time moving up: "+str(time_up)+" [s]")
+			#time.sleep(move_up_OCP_delay)
+			#zeal_press_button(up,down,move_up,i,f,"moving up")
+				
+			#press_button(serialport,key3_pressed,move_out,command_rest,i,f,"moving out")
+				
+			#press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+			#zeal_press_button(down,up,move_down,i,f,"moving down")
+			
+			#time_down = press_button_reed(serialport,key2_pressed,reed_switch_down,move_down,command_rest,i,f,"moving down")
+			#print(str(time_down))
+			
+			press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+
+			
+			#if (i != cycles):
+			f.write(timestamp()+"  3/4-cycle [" + str(i) + "] rest time started\n")
+			for j in range(cycle_rest,0,-1):
+				sys.stdout.write("\r---Next quarter-cycle starts in: {:2d}".format(j) + " ")
+				sys.stdout.flush()
+				time.sleep(1)
+			sys.stdout.flush()
+			sys.stdout.write("\r" + timestamp() + "  3/4-cycle [" + str(i) + "] complete            \n")
+			f.write(timestamp()+"  3/4-cycle [" + str(i) + "] rest time ended. Cycle 75% complete\n")
+
+			
+			if (i > 0) and (cycle_rest > 300):
+				print("Turning TiD1 ON...")
+				f.write(timestamp()+"  Turning TiD1 ON...\n")
+				end_time2 = time.time() + 1
+				while time.time() < end_time2:
+					writeport = serialport.write(key6_pressed)
+				time.sleep(1)
+				
+			#press_button(serialport,key1_pressed,move_up,command_rest,i,f,"moving up")
+			time_up = press_button_reed(serialport,key1_pressed,reed_switch_up,move_up,command_rest,i,f,"moving up")
+			print("Time moving up: "+str(time_up)+" [s]")
+			#time.sleep(move_up_OCP_delay)
 			
 			#press_button(serialport,key4_pressed,move_in,command_rest,i,f,"moving in")
+			
+			#press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
+			
+			#time_down = press_button_reed(serialport,key2_pressed,reed_switch_down,move_down,command_rest,i,f,"moving down")
+			#print(str(time_down))
 			
 			press_button(serialport,key2_pressed,move_down,command_rest,i,f,"moving down")
 				
 			# Cycle rest countdown and rest	
 			#if (i != cycles):
-			f.write(timestamp()+"  Cycle [" + str(i) + "] rest time started\n")
-			for j in xrange(cycle_rest,0,-1):
-				sys.stdout.write("\r---Next cycle starts in: {:2d}".format(j) + " ")
+			f.write(timestamp()+"  Day-Cycle [" + str(i) + "] rest time started\n")
+			for j in range(cycle_rest,0,-1):
+				sys.stdout.write("\r---Next day-cycle starts in: {:2d}".format(j) + " ")
 				sys.stdout.flush()
 				time.sleep(1)
 			sys.stdout.flush()
-			sys.stdout.write("\r" + timestamp() + "  Cycle [" + str(i) + "] complete            \n")
-			f.write(timestamp()+"  Cycle [" + str(i) + "] rest time ended. Cycle 100% complete\n")
+			sys.stdout.write("\r" + timestamp() + "  Day-Cycle [" + str(i) + "] complete            \n")
+			f.write(timestamp()+"  Day-Cycle [" + str(i) + "] rest time ended. Cycle 100% complete\n")
 
 	except KeyboardInterrupt:
-		print "\nTest interupted by user"
+		print("\nTest interupted by user")
 		f.write(timestamp()+"  Test interupted by user")
 		serialport.close()
 		f.close()
@@ -243,12 +359,12 @@ if checktime2:
 		#GPIO.cleanup()
 
 else:
-	print "Not enough time in a day to complete the test"
+	print("Not enough time in a day to complete the test")
 	f.write(timestamp()+"  Not enough time in a day to complete the test")
 	
 
 if not f.closed:
-	print "\nTest completed sucessfully"	
+	print("\nTest completed sucessfully")
 	f.write(timestamp()+"  Test completed sucessfully")
 	f.close()
 	serialport.close()
